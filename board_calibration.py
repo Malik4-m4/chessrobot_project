@@ -108,11 +108,13 @@ GRIPPER_TIP_OFFSET_S = (0.018 / 2) - 0.00   # أوفسيت الجنوب (S probe
 GRIPPER_TIP_OFFSET_W = (0.018 / 2) - 0.00   # أوفسيت الغرب (W probes)
 
 # =====================================================================
-# --- Fine-tuning offsets (board frame, persisted to YAML) ---
-# --- بتعدلها بالعين بدون إعادة معايرة. الإشارة بإحداثيات اللوحة ---
+# --- Fine-tuning offsets (board frame) ---
+# --- ⭐ source of truth: عدّلهم هنا مباشرة. مش بيتحفظوا/يتقروا من YAML ---
+# --- عشان لما تعدل القيم تتطبق فوراً في كل الملفات اللي بتستورد الموديول ---
 # ---   U direction: e_h  (من a -> h)
 # ---   V direction: e_N  (من row1 -> row8)
-# --- هذه قيم default. القيم الفعلية بتُقرأ/تُكتب من ملف الـYAML.
+# --- runtime tuning عبر أمر offset في index بيعدّل في الذاكرة فقط.
+# --- لتثبيت قيمة دائمة: عدّل الثوابت دي يدوياً.
 # =====================================================================
 SQUARE_OFFSET_U = 0.000   # m, موجب → نحو h
 SQUARE_OFFSET_V = 0.000   # m, موجب → نحو row 8
@@ -431,7 +433,10 @@ class BoardCalibration:
     def set_offsets(self, offset_u=None, offset_v=None, rebuild=True):
         """
         يضبط الـfine-tuning offsets (بالأمتار، بإطار اللوحة) ويعيد بناء
-        المواقع إذا rebuild=True. لا يحفظ أوتوماتيكياً - استخدم save() بعد كده.
+        المواقع إذا rebuild=True.
+
+        ⚠️ التعديل ده مؤقت (in-memory فقط). عشان يبقى دائم لازم تعدّل
+        الـconstants SQUARE_OFFSET_U/V في أعلى الملف يدوياً.
         """
         if offset_u is not None:
             self.square_offset_u = float(offset_u)
@@ -439,9 +444,11 @@ class BoardCalibration:
             self.square_offset_v = float(offset_v)
         if rebuild:
             self.build_positions()
-        rospy.loginfo(f"[OFFSET] square_offset_u={self.square_offset_u*1000:+.2f}mm "
-                      f"square_offset_v={self.square_offset_v*1000:+.2f}mm "
+        rospy.loginfo(f"[OFFSET] in-memory: u={self.square_offset_u*1000:+.2f}mm "
+                      f"v={self.square_offset_v*1000:+.2f}mm "
                       f"({'rebuilt' if rebuild else 'pending'})")
+        rospy.loginfo(f"[OFFSET] لتثبيت دائم: عدّل SQUARE_OFFSET_U/V "
+                      f"في أعلى board_calibration_p1_v1.py")
 
 
     # ------------------------------------------------------------------
@@ -899,17 +906,17 @@ class BoardCalibration:
             'square_size':      float(SQUARE_SIZE),
             'margin':           float(MARGIN),
             'board_outer_size': float(BOARD_OUTER_SIZE),
-            # --- fine-tuning offsets ---
-            'square_offset_u':  float(self.square_offset_u),
-            'square_offset_v':  float(self.square_offset_v),
+            # NOTE: square_offset_u/v مش بيتحفظوا في YAML.
+            # الـsource of truth هو الـconstants في أعلى الملف.
         }
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         with open(path, 'w') as f:
             yaml.safe_dump(data, f, default_flow_style=False)
         rospy.loginfo(f"Calibration saved -> {path}")
-        rospy.loginfo(f"  square_offset = "
+        rospy.loginfo(f"  current square_offset (in-memory) = "
                       f"({self.square_offset_u*1000:+.2f}, "
-                      f"{self.square_offset_v*1000:+.2f}) mm")
+                      f"{self.square_offset_v*1000:+.2f}) mm "
+                      f"[NOT persisted; edit constants to make permanent]")
 
     def load(self, path=CALIB_FILE):
         if not os.path.exists(path):
@@ -921,16 +928,15 @@ class BoardCalibration:
         self.board_theta  = float(data['theta_rad'])
         self.e_h_axis     = np.array([data['e_h_x'], data['e_h_y']])
         self.e_N_axis     = np.array([data['e_N_x'], data['e_N_y']])
-        # --- fine-tuning offsets (مع fallback للملفات القديمة) ---
-        self.square_offset_u = float(data.get('square_offset_u', SQUARE_OFFSET_U))
-        self.square_offset_v = float(data.get('square_offset_v', SQUARE_OFFSET_V))
+        # NOTE: square_offset_u/v ما بيتقروش من YAML.
+        # القيم بتفضل من __init__ (الـconstants) - دي الـsource of truth.
         self.build_positions()
         rospy.loginfo(f"Calibration loaded <- {path}")
         rospy.loginfo(f"  corner=({self.board_corner[0]:+.4f}, "
                       f"{self.board_corner[1]:+.4f}), "
                       f"theta={np.degrees(self.board_theta):+.3f} deg")
-        rospy.loginfo(f"  square_offset=("
-                      f"{self.square_offset_u*1000:+.2f}, "
+        rospy.loginfo(f"  square_offset (from constants) = "
+                      f"({self.square_offset_u*1000:+.2f}, "
                       f"{self.square_offset_v*1000:+.2f}) mm")
         return True
 
