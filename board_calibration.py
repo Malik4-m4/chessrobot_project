@@ -64,8 +64,6 @@ GRIPPER_SPEED = 0.1
 # --- القيم مأخوذة يدوياً من المختبر بحيث ما يصطدمش مع الروبوت التاني ---
 # --- لتغيير الوضعية: عدّل القيم هنا فقط (radians). ---
 # =====================================================================
-READY_POSE_NAME = "ready"  # legacy، مش مستخدم - متروك للتوافق فقط
-
 READY_JOINT_VALUES = [
     -0.06985691071725911,   # panda1_joint1
     -1.1998518015580744,    # panda1_joint2
@@ -245,14 +243,31 @@ def move_to_pose(move_group, x, y, z, vf, af, yaw=0.0):
 
 def move_to_ready(move_group):
     """
-    يحرك الروبوت لوضعية الـready المعرّفة بقيم joint مباشرة في
-    READY_JOINT_VALUES (radians) أعلى الملف.
+    يحرك الروبوت لوضعية الـREADY (joint-space) المعرّفة بقيم joint مباشرة في
+    READY_JOINT_VALUES (radians) في أعلى الملف.
 
     هذه النسخة لا تعتمد على الـSRDF (set_named_target) - بدل كده
     بتحدد الـ7 joints مباشرة، مما يضمن أن الوضعية ثابتة ومعروفة
     وما تتعارضش مع الروبوت التاني.
 
-    لتغيير الوضعية: عدّل القيم في READY_JOINT_VALUES أعلى الملف.
+    Parameters
+    ----------
+    move_group : moveit_commander.MoveGroupCommander
+        الـMoveGroupCommander الخاص بالذراع (مثلاً panda1_arm).
+
+    Returns
+    -------
+    bool
+        True إذا وصل بنجاح، False غير ذلك.
+
+    Usage (من ملف تاني)
+    -------------------
+    >>> from board_calibration import move_to_ready
+    >>> import moveit_commander
+    >>> arm = moveit_commander.MoveGroupCommander("panda1_arm")
+    >>> move_to_ready(arm)   # بدل move_group.set_named_target("ready")
+
+    لتغيير الوضعية: عدّل القيم في READY_JOINT_VALUES في أعلى الملف.
     """
     rospy.loginfo("[READY] Moving to joint-space ready pose:")
     rospy.loginfo(f"        joints (rad) = "
