@@ -113,11 +113,35 @@ GRIPPER_TIP_OFFSET_W = (0.018 / 2) - 0.00   # أوفسيت الغرب (W probes)
 # --- عشان لما تعدل القيم تتطبق فوراً في كل الملفات اللي بتستورد الموديول ---
 # ---   U direction: e_h  (من a -> h)
 # ---   V direction: e_N  (من row1 -> row8)
-# --- runtime tuning عبر أمر offset في index بيعدّل في الذاكرة فقط.
-# --- لتثبيت قيمة دائمة: عدّل الثوابت دي يدوياً.
 # =====================================================================
+#
+# Layer 1: Global U/V offset (إزاحة uniform على كل اللوحة).
+#          استخدمها لما الإزاحة ثابتة في كل المربعات.
+#
 SQUARE_OFFSET_U = 0.000   # m, موجب → نحو h
 SQUARE_OFFSET_V = 0.000   # m, موجب → نحو row 8
+
+#
+# Layer 2: Per-corner offsets (bilinear interpolation للداخل).
+#          استخدمها لما الخطأ بيختلف من ركن لآخر (gradient/skew/scale).
+#          القيم بالـmillimeters (mm) عشان أسهل للقراءة.
+#          الإشارة: (dU_mm, dV_mm) - بإطار اللوحة.
+#
+# المنطق:
+#   - الـ4 corners هي قياس مباشر لمراكز a1, h1, a8, h8.
+#   - الـ60 مربع التانيين بيتحسبوا بـbilinear interpolation:
+#       * على الـedges: خط مستقيم بين الزاويتين
+#       * في الداخل: bilinear surface ناعمة
+#   - لو كل القيم = (0,0) → لا يوجد bilinear correction (الـcalibration الأصلية).
+#   - لو كل القيم متساوية = نفس الـSQUARE_OFFSET_U/V (redundant).
+#   - الـtheta و axes يفضلوا من probing - مش بيتغيروا.
+#
+CORNER_OFFSETS = {
+    'a1': (0.0, 0.0),   # (dU_mm, dV_mm)
+    'h1': (0.0, 0.0),
+    'a8': (0.0, 0.0),
+    'h8': (0.0, 0.0),
+}
 
 # --- نقاط بدء الـprobing ---
 W1_START_XY = (0.50,  0.15)
@@ -356,6 +380,11 @@ class BoardCalibration:
         self.square_offset_u = float(SQUARE_OFFSET_U)
         self.square_offset_v = float(SQUARE_OFFSET_V)
 
+        # --- Per-corner offsets (mm, board frame). نسخة instance من الـconstants. ---
+        # المفاتيح physical: a1, h1, a8, h8 (مش حسب لون اللاعب).
+        self.corner_offsets = {k: (float(v[0]), float(v[1]))
+                               for k, v in CORNER_OFFSETS.items()}
+
         self.square_positions    = {}
         self.mirrored_squares    = {}
         self.promotion_positions = {}
@@ -363,6 +392,32 @@ class BoardCalibration:
         self.hx = self.hy = self.hz = 0.0
 
         self.build_positions()
+
+
+    # ------------------------------------------------------------------
+    # --- helper: bilinear offset لكل مربع ---
+    # ------------------------------------------------------------------
+    def _bilinear_offset_mm(self, col_idx, row_idx):
+        """
+        ترجع (du_mm, dv_mm) للمربع المعطى عبر bilinear interpolation
+        بين الـ4 corners (a1, h1, a8, h8).
+
+        col_idx: 0..7 (a..h)
+        row_idx: 0..7 (row1..row8)
+        """
+        u = col_idx / 7.0   # 0=a, 1=h
+        v = row_idx / 7.0   # 0=row1, 1=row8
+        c = self.corner_offsets
+
+        du = ((1.0 - u) * (1.0 - v) * c['a1'][0] +
+              u         * (1.0 - v) * c['h1'][0] +
+              (1.0 - u) * v         * c['a8'][0] +
+              u         * v         * c['h8'][0])
+        dv = ((1.0 - u) * (1.0 - v) * c['a1'][1] +
+              u         * (1.0 - v) * c['h1'][1] +
+              (1.0 - u) * v         * c['a8'][1] +
+              u         * v         * c['h8'][1])
+        return du, dv
 
 
     # ------------------------------------------------------------------
@@ -377,15 +432,25 @@ class BoardCalibration:
         eh     = np.asarray(eh,     dtype=float)
         eN     = np.asarray(eN,     dtype=float)
 
-        # --- إزاحة fine-tuning بإطار اللوحة (تنطبق على كل النقاط) ---
-        fine = self.square_offset_u * eh + self.square_offset_v * eN
+        # --- Layer 1: global U/V offset (uniform). ---
+        global_fine = self.square_offset_u * eh + self.square_offset_v * eN
+
+        # --- Layer 2: bilinear per-corner offset (per-square). ---
+        # ينطبق على المربعات الـ64 فقط (داخل اللوحة).
+        # promotion + graveyard خارج اللوحة، فيستخدموا global_fine فقط.
 
         sq_pos = {}
         for col_idx, col in enumerate('abcdefgh'):
             for row in range(1, 9):
-                u = MARGIN + (col_idx + 0.5) * SQUARE_SIZE
-                v = MARGIN + (row - 1 + 0.5) * SQUARE_SIZE
-                p = corner + u * eh + v * eN + fine
+                u_pos = MARGIN + (col_idx + 0.5) * SQUARE_SIZE
+                v_pos = MARGIN + (row - 1 + 0.5) * SQUARE_SIZE
+
+                # bilinear corner offset لهذا المربع (mm → m)
+                du_mm, dv_mm = self._bilinear_offset_mm(col_idx, row - 1)
+                bilinear_fine = (du_mm / 1000.0) * eh + (dv_mm / 1000.0) * eN
+
+                fine = global_fine + bilinear_fine
+                p = corner + u_pos * eh + v_pos * eN + fine
                 sq_pos[f"{col}{row}"] = (float(p[0]), float(p[1]), ORIGIN_Z)
 
         board_u_far = MARGIN + 8 * SQUARE_SIZE + 0.01
@@ -399,7 +464,8 @@ class BoardCalibration:
         }
         promo = {}
         for letter, v in v_by_letter.items():
-            p = corner + u_promo * eh + v * eN + fine
+            # promotion خارج اللوحة → global offset فقط (مش bilinear)
+            p = corner + u_promo * eh + v * eN + global_fine
             promo[letter] = (float(p[0]), float(p[1]), ORIGIN_Z)
 
         graves = []
@@ -407,7 +473,8 @@ class BoardCalibration:
             u = board_u_far + (col_g + 0.5) * SQUARE_SIZE
             for row_g in range(8):
                 v = MARGIN + (0.5 + row_g) * SQUARE_SIZE
-                p = corner + u * eh + v * eN + fine
+                # graveyard خارج اللوحة → global offset فقط
+                p = corner + u * eh + v * eN + global_fine
                 graves.append((float(p[0]), float(p[1]), ORIGIN_Z))
 
         self.square_positions    = sq_pos
@@ -449,6 +516,59 @@ class BoardCalibration:
                       f"({'rebuilt' if rebuild else 'pending'})")
         rospy.loginfo(f"[OFFSET] لتثبيت دائم: عدّل SQUARE_OFFSET_U/V "
                       f"في أعلى board_calibration_p1_v1.py")
+
+
+    # ------------------------------------------------------------------
+    # --- API لضبط corner offsets برمجياً ---
+    # ------------------------------------------------------------------
+    def set_corner_offset(self, corner_name, du_mm=None, dv_mm=None,
+                          rebuild=True):
+        """
+        يضبط offset لركن واحد من الـ4. corner_name physical:
+        'a1', 'h1', 'a8', 'h8'.
+
+        - du_mm: إزاحة على محور U (a→h) بالمليمتر، أو None لعدم التغيير.
+        - dv_mm: إزاحة على محور V (row1→row8) بالمليمتر، أو None.
+        - rebuild: لو True يعيد بناء square_positions تلقائياً.
+
+        ⚠️ التعديل مؤقت (in-memory). لتثبيت دائم: عدّل CORNER_OFFSETS
+           في أعلى board_calibration_p1_v1.py.
+        """
+        if corner_name not in self.corner_offsets:
+            rospy.logerr(f"[CORNER_OFFSET] Invalid corner: {corner_name!r}. "
+                         f"Must be one of: "
+                         f"{sorted(self.corner_offsets.keys())}")
+            return False
+
+        cur_du, cur_dv = self.corner_offsets[corner_name]
+        new_du = float(du_mm) if du_mm is not None else cur_du
+        new_dv = float(dv_mm) if dv_mm is not None else cur_dv
+        self.corner_offsets[corner_name] = (new_du, new_dv)
+
+        if rebuild:
+            self.build_positions()
+
+        rospy.loginfo(f"[CORNER_OFFSET] {corner_name} = "
+                      f"({new_du:+.2f}, {new_dv:+.2f}) mm "
+                      f"({'rebuilt' if rebuild else 'pending'})")
+        return True
+
+    def reset_corner_offsets(self, rebuild=True):
+        """يصفّر كل الـ4 corner offsets."""
+        for cname in ('a1', 'h1', 'a8', 'h8'):
+            self.corner_offsets[cname] = (0.0, 0.0)
+        if rebuild:
+            self.build_positions()
+        rospy.loginfo(f"[CORNER_OFFSET] all reset to (0, 0)")
+
+    def print_corner_offsets_constants(self):
+        """يطبع الـcorner offsets الحالية بصيغة constants جاهزة للنسخ."""
+        print("# انسخ ده فوق board_calibration_p1_v1.py:")
+        print("CORNER_OFFSETS = {")
+        for cname in ('a1', 'h1', 'a8', 'h8'):
+            du, dv = self.corner_offsets[cname]
+            print(f"    '{cname}': ({du:+.4f}, {dv:+.4f}),")
+        print("}")
 
 
     # ------------------------------------------------------------------
@@ -958,6 +1078,10 @@ class BoardCalibration:
         print(f"  square_offset (U,V)   : "
               f"({self.square_offset_u*1000:+.2f}, "
               f"{self.square_offset_v*1000:+.2f}) mm")
+        print(f"  corner offsets (mm)   :")
+        for cname in ('a1', 'h1', 'a8', 'h8'):
+            du, dv = self.corner_offsets[cname]
+            print(f"      {cname}: U={du:+.2f}  V={dv:+.2f}")
         print(f"  a1 center             : "
               f"({self.square_positions['a1'][0]:+.4f}, "
               f"{self.square_positions['a1'][1]:+.4f})")
